@@ -1,0 +1,23 @@
+# Salidas generadas
+output/
+properties/
+tmp_*.html
+tmp-edge-profile/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Fotos de clientes (no subir al repo público)
+*.jpg
+*.jpeg
+*.png
+*.webp
+!assets/**
