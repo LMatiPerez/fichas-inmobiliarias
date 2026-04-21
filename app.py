@@ -19,7 +19,7 @@ from generar_fichas import (
     build_card,
     build_caption,
     export_outputs,
-    import_mudafy_listing,
+    import_listing,
     load_config,
     load_rows,
     slugify,
@@ -99,22 +99,22 @@ tab_url, tab_csv, tab_manual = st.tabs(
 )
 
 with tab_url:
-    st.subheader("Generar desde una publicación de Mudafy")
+    st.subheader("Generar desde una publicación online")
     st.markdown(
-        "Pegá el link de cualquier propiedad de Mudafy y el sistema descarga "
-        "los datos y las fotos automáticamente."
+        "Pegá el link de cualquier propiedad de **Mudafy** o **ZonaProp** "
+        "y el sistema descarga los datos y las fotos automáticamente."
     )
     url_input = st.text_input(
-        "URL de Mudafy",
-        placeholder="https://mudafy.com.ar/ficha/propiedad/...",
+        "URL de Mudafy o ZonaProp",
+        placeholder="https://mudafy.com.ar/... o https://www.zonaprop.com.ar/...",
         label_visibility="collapsed",
         key="url_input",
     )
     if st.button("Generar ficha", type="primary", use_container_width=True, key="btn_url"):
         if url_input.strip():
-            with st.spinner("Descargando datos y fotos desde Mudafy..."):
+            with st.spinner("Descargando datos y fotos..."):
                 try:
-                    row = import_mudafy_listing(url_input.strip(), config, DEFAULT_PROPERTIES_DIR)
+                    row = import_listing(url_input.strip(), config, DEFAULT_PROPERTIES_DIR)
                 except Exception as exc:
                     st.error(f"No se pudo importar la publicación: {exc}")
                     row = None

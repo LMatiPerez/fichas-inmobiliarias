@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import io
 import json
@@ -15,6 +16,20 @@ from typing import Iterable, Sequence
 from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+try:
+    from curl_cffi import requests as _cffi_requests
+    _CFFI_AVAILABLE = True
+except ImportError:
+    _cffi_requests = None  # type: ignore
+    _CFFI_AVAILABLE = False
+
+try:
+    from bs4 import BeautifulSoup as _BeautifulSoup
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BeautifulSoup = None  # type: ignore
+    _BS4_AVAILABLE = False
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -650,6 +665,329 @@ def import_mudafy_listing(
     download_mudafy_photos(payload, folder)
     download_mudafy_map(payload, folder, regular_font_path)
     return row
+
+
+# ── ZonaProp ──────────────────────────────────────────────────────────────────
+
+_ZP_FEATURE_MAP = {
+    "CFT100":  "total_m2",
+    "CFT101":  "cubierta_m2",
+    "CFT1":    "ambientes",
+    "CFT2":    "dormitorios",
+    "CFT3":    "banos",
+    "CFT4":    "toilettes",
+    "CFT5":    "antiguedad",
+    "1000016": "plantas",
+    "1000019": "disposicion",
+    "1000027": "luminosidad",
+    "2000203": "semicubierta_m2",
+}
+_ZP_FEATURES_TEXTO = {"disposicion", "luminosidad"}
+
+_ZP_TIPO_MAP = {
+    "veclap": "Departamento", "veclph": "PH",       "veclca": "Casa",
+    "vecllc": "Local",        "vecltr": "Terreno",   "vecloc": "Oficina",
+    "vecled": "Edificio",     "veclde": "Deposito",  "veclga": "Cochera",
+    "veclbg": "Galpón",       "ememve": "Emprendimiento",
+}
+
+
+def fetch_zonaprop_html(url: str) -> str:
+    """Descarga la página de ZonaProp usando curl_cffi para evitar bloqueos."""
+    if _CFFI_AVAILABLE:
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "es-AR,es;q=0.9",
+        }
+        resp = _cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=25)
+        return resp.text
+    return fetch_url_text(url)
+
+
+def extract_zonaprop_slug(url: str) -> str:
+    path = urlparse(url).path.rstrip("/")
+    last = path.split("/")[-1]
+    last = re.sub(r"\.html$", "", last)
+    return slugify(last) or "zonaprop-propiedad"
+
+
+def parse_zonaprop_price(html: str) -> tuple[str, str, str]:
+    """Retorna (moneda, precio, expensas)."""
+    moneda, precio, expensas = "USD", "", ""
+    m = re.search(r'"prices"\s*:\s*\[(\{[^\]]+\})\]', html)
+    if m:
+        try:
+            price_obj = json.loads(m.group(1))
+            moneda = price_obj.get("currency", price_obj.get("isoCode", "USD"))
+            precio = str(price_obj.get("amount", price_obj.get("formattedAmount", ""))).replace(".", "")
+        except Exception:
+            pass
+    if not precio:
+        m2 = re.search(r"'price'\s*:\s*'([^']+)'", html)
+        if m2:
+            raw = m2.group(1)
+            moneda = "USD" if "USD" in raw.upper() else "$"
+            precio = re.sub(r"[^\d]", "", raw)
+    m3 = re.search(r"'expenses'\s*:\s*'(\d+)'", html)
+    if m3:
+        expensas = m3.group(1)
+    return moneda, precio, expensas
+
+
+def extract_zonaprop_main_features(html: str) -> dict:
+    """Extrae el objeto mainFeatures del JS embebido."""
+    m = re.search(r'const mainFeatures\s*=\s*(\{.+?\})\s*;?\s*\n', html, re.DOTALL)
+    if not m:
+        m = re.search(r'mainFeatures\s*=\s*(\{[^;]{50,8000}\})\s*;', html, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return {}
+
+
+def extract_zonaprop_coords(html: str) -> tuple[str, str]:
+    lat_m = re.search(r'mapLatOf\s*=\s*"([^"]+)"', html)
+    lng_m = re.search(r'mapLngOf\s*=\s*"([^"]+)"', html)
+    lat = base64.b64decode(lat_m.group(1)).decode().strip() if lat_m else ""
+    lng = base64.b64decode(lng_m.group(1)).decode().strip() if lng_m else ""
+    return lat, lng
+
+
+def extract_zonaprop_map_url(html: str) -> str:
+    m = re.search(r'urlMapOf\s*=\s*"([^"]+)"', html)
+    if m:
+        try:
+            return base64.b64decode(m.group(1)).decode().strip()
+        except Exception:
+            pass
+    return ""
+
+
+def extract_zonaprop_photos(html: str) -> list[str]:
+    """Devuelve hasta 4 URLs de fotos en la resolución más alta disponible."""
+    pat = re.compile(
+        r'(https://imgar\.zonapropcdn\.com/avisos/(?:resize/)?'
+        r'\d[\d/]+/(\d+x\d+)/(\d+)\.jpg[^\s"\'<]*)',
+        re.IGNORECASE,
+    )
+    by_id: dict[str, tuple[int, str]] = {}
+    for full_url, res_str, foto_id in pat.findall(html):
+        w = int(res_str.split("x")[0])
+        if foto_id not in by_id or w > by_id[foto_id][0]:
+            by_id[foto_id] = (w, full_url)
+    # Ordenar: la primera imagen (isFirstImage) primero, luego por orden de aparición
+    first_url = ""
+    first_pat = re.search(
+        r'https://imgar\.zonapropcdn\.com/avisos/[^\s"\'<]+isFirstImage=true', html
+    )
+    if first_pat:
+        first_url_raw = first_pat.group(0)
+        foto_id_m = re.search(r'/(\d{8,})\.jpg', first_url_raw)
+        if foto_id_m and foto_id_m.group(1) in by_id:
+            first_id = foto_id_m.group(1)
+            first_url = by_id.pop(first_id)[1]
+    ordered = [first_url] if first_url else []
+    ordered += [url for _, url in sorted(by_id.values(), key=lambda x: -x[0])]
+    return ordered[:4]
+
+
+def extract_zonaprop_amenities(html: str, datos: dict) -> list[str]:
+    amenities: list[str] = []
+    if datos.get("tiene_balcon"):
+        amenities.append("Balcón")
+    if datos.get("tiene_patio"):
+        amenities.append("Patio")
+    if datos.get("disposicion"):
+        amenities.append(f"Disposición {datos['disposicion']}")
+    if datos.get("luminosidad"):
+        amenities.append(f"Luminosidad {datos['luminosidad']}")
+    flags_m = re.search(r"'flagsFeatures'\s*:\s*(\[[^\]]+\])", html)
+    if flags_m:
+        try:
+            flags = json.loads(flags_m.group(1).replace("'", '"'))
+            for f in flags:
+                label = f.get("label", "")
+                if label:
+                    amenities.append(label)
+        except Exception:
+            pass
+    return dedupe_strings(amenities)
+
+
+def parse_zonaprop_html(url: str, html: str) -> dict[str, str]:
+    """Convierte el HTML de ZonaProp en un property_row listo para build_card."""
+    datos: dict = {}
+
+    # Schema.org
+    if _BS4_AVAILABLE:
+        soup = _BeautifulSoup(html, "html.parser")
+        for sc in soup.find_all("script", type="application/ld+json"):
+            try:
+                ld = json.loads(sc.string or "{}")
+                if ld.get("@type") in ("Apartment", "House", "RealEstateListing",
+                                       "SingleFamilyResidence", "Accommodation"):
+                    datos["titulo_completo"]      = re.sub(r"\s*-\s*Zonaprop$", "", ld.get("name", ""), flags=re.IGNORECASE).strip()
+                    datos["descripcion_completa"] = ld.get("description", "")
+                    addr = ld.get("address", {})
+                    datos["direccion"]  = addr.get("streetAddress", "")
+                    datos["zona"]       = addr.get("addressRegion", "")
+                    datos["localidad"]  = addr.get("addressLocality", "").split(",")[0].strip()
+                    fs = ld.get("floorSize", {})
+                    if fs:
+                        datos["total_m2"] = str(int(fs.get("value", 0) or 0)) if fs.get("value") else ""
+                    datos["ambientes"]   = str(ld.get("numberOfRooms", "") or "")
+                    datos["banos"]       = str(ld.get("numberOfBathroomsTotal", "") or "")
+                    datos["dormitorios"] = str(ld.get("numberOfBedrooms", "") or "")
+                    break
+            except Exception:
+                pass
+    else:
+        # Fallback sin bs4: regex sobre JSON-LD
+        m = re.search(r'"@type"\s*:\s*"Apartment".*?"name"\s*:\s*"([^"]+)"', html, re.DOTALL)
+        if m:
+            datos["titulo_completo"] = re.sub(r"\s*-\s*Zonaprop$", "", m.group(1)).strip()
+
+    # mainFeatures
+    features_raw = extract_zonaprop_main_features(html)
+    for feat_id, campo in _ZP_FEATURE_MAP.items():
+        if feat_id in features_raw:
+            val = features_raw[feat_id].get("value")
+            if val is None:
+                continue
+            if campo not in _ZP_FEATURES_TEXTO:
+                try:
+                    num = float(str(val).replace(",", "."))
+                    val = str(int(num)) if num == int(num) else str(num)
+                except (ValueError, TypeError):
+                    val = "0"
+            datos[campo] = str(val)
+
+    # Tipo de propiedad desde URL
+    m_tipo = re.search(r'/([a-z]{4,6})in-', url.split("/")[-1])
+    tipo = _ZP_TIPO_MAP.get(m_tipo.group(1), "") if m_tipo else ""
+
+    # Código (posting ID)
+    codigo_m = re.search(r"postingId\s*=\s*[\"']?(\d+)[\"']?", html)
+    codigo = codigo_m.group(1) if codigo_m else ""
+
+    # Balcón / patio desde texto combinado
+    combined = (
+        datos.get("titulo_completo", "") + " " + datos.get("descripcion_completa", "")
+    ).lower()
+    datos["tiene_balcon"] = bool(re.search(r"balc[oó]n|terraza", combined))
+    datos["tiene_patio"]  = bool(re.search(r"patio|jard[ií]n", combined))
+
+    moneda, precio, expensas = parse_zonaprop_price(html)
+    lat, lng = extract_zonaprop_coords(html)
+
+    ubicacion_parts = [p for p in [datos.get("direccion", ""), datos.get("zona", ""), datos.get("localidad", "")] if p]
+    ubicacion = " | ".join(dict.fromkeys(ubicacion_parts))
+
+    amenities = extract_zonaprop_amenities(html, datos)
+
+    slug = extract_zonaprop_slug(url)
+
+    return {
+        "slug":           slug,
+        "titulo":         datos.get("titulo_completo", slug),
+        "ubicacion":      ubicacion,
+        "codigo":         codigo,
+        "operacion":      "Venta" if "venta" in url.lower() else "Alquiler",
+        "tipo_inmueble":  tipo,
+        "moneda":         moneda,
+        "precio":         precio,
+        "descripcion":    datos.get("descripcion_completa", ""),
+        "ambientes":      datos.get("ambientes", ""),
+        "dormitorios":    datos.get("dormitorios", ""),
+        "banos":          datos.get("banos", ""),
+        "toilettes":      datos.get("toilettes", ""),
+        "garage":         "",
+        "cocheras":       "",
+        "antiguedad":     datos.get("antiguedad", ""),
+        "expensas":       expensas,
+        "orientacion":    "",
+        "cubierta_m2":    datos.get("cubierta_m2", ""),
+        "semicubierta_m2": datos.get("semicubierta_m2", ""),
+        "total_m2":       datos.get("total_m2", ""),
+        "terreno_m2":     "",
+        "amenities":      "|".join(amenities),
+        "url":            url,
+        "lat":            lat,
+        "lng":            lng,
+    }
+
+
+def import_zonaprop_listing(
+    url: str,
+    config: dict,
+    properties_dir: Path,
+    slug_override: str | None = None,
+) -> dict[str, str]:
+    html = fetch_zonaprop_html(url)
+    row = parse_zonaprop_html(url, html)
+    if slug_override:
+        row["slug"] = slugify(slug_override)
+
+    folder = properties_dir / row["slug"]
+    folder.mkdir(parents=True, exist_ok=True)
+
+    # Fotos
+    photos = extract_zonaprop_photos(html)
+    names = ["foto_principal.jpg", "foto_1.jpg", "foto_2.jpg", "foto_3.jpg"]
+    for name, photo_url in zip(names, photos):
+        try:
+            save_remote_image_as_jpeg(normalize_remote_url(photo_url), folder / name)
+        except Exception:
+            pass
+
+    # Mapa
+    map_path = folder / "mapa.png"
+    if not map_path.exists():
+        map_url = extract_zonaprop_map_url(html)
+        if map_url:
+            try:
+                data = fetch_url_bytes(map_url)
+                with Image.open(io.BytesIO(data)) as src:
+                    src.convert("RGB").save(map_path, format="PNG")
+            except Exception:
+                pass
+        if not map_path.exists():
+            lat = as_float(row.get("lat", ""))
+            lng = as_float(row.get("lng", ""))
+            if lat is not None and lng is not None:
+                regular_font_path, _ = resolve_font_paths(config)
+                generated = build_osm_map_image(lat, lng, (610, 350), regular_font_path)
+                if generated:
+                    generated.save(map_path, format="PNG")
+
+    return row
+
+
+def detect_listing_source(url: str) -> str:
+    """Devuelve 'mudafy', 'zonaprop' o 'unknown'."""
+    host = urlparse(url).netloc.lower()
+    if "mudafy" in host:
+        return "mudafy"
+    if "zonaprop" in host:
+        return "zonaprop"
+    return "unknown"
+
+
+def import_listing(
+    url: str,
+    config: dict,
+    properties_dir: Path,
+    slug_override: str | None = None,
+) -> dict[str, str]:
+    """Importa desde Mudafy o ZonaProp detectando el origen automáticamente."""
+    source = detect_listing_source(url)
+    if source == "mudafy":
+        return import_mudafy_listing(url, config, properties_dir, slug_override)
+    if source == "zonaprop":
+        return import_zonaprop_listing(url, config, properties_dir, slug_override)
+    raise ValueError(f"URL no reconocida (no es Mudafy ni ZonaProp): {url}")
 
 
 def resolve_font_paths(config: dict) -> tuple[Path, Path]:
@@ -1582,7 +1920,7 @@ def main() -> None:
     config = load_config(args.config)
 
     if args.mudafy_url:
-        row = import_mudafy_listing(
+        row = import_listing(
             url=args.mudafy_url,
             config=config,
             properties_dir=args.properties_dir,
