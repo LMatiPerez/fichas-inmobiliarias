@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import io
 import json
 import sys
@@ -138,6 +139,18 @@ def process_zonaprop_from_html(html: str, url: str) -> dict | None:
         return None
 
 
+def read_uploaded_text(uploaded_file) -> str:
+    if not uploaded_file:
+        return ""
+    data = uploaded_file.getvalue()
+    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
 def make_bookmarklet(app_url: str) -> str:
     """Genera el código JavaScript del bookmarklet para ZonaProp."""
     app_url = app_url.rstrip("/")
@@ -253,14 +266,17 @@ d.amenities=amenities.filter(function(v,i,a){return a.indexOf(v)===i;}).join('|'
 var encoded=btoa(unescape(encodeURIComponent(JSON.stringify(d))));
 var safe=encoded.replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 var appUrl='APP_URL_PLACEHOLDER';
-location.href=appUrl+'?zp='+safe;
+var sep=appUrl.indexOf('?')>=0?'&':'?';
+location.href=appUrl+sep+'zp='+safe;
 }catch(ex){alert('Error: '+ex.message);}
 })();"""
     js = js.replace("APP_URL_PLACEHOLDER", app_url)
-    # Renombrar fm2 → fiMatch para evitar conflicto con fm (feature map)
-    js = js.replace("var fm2=", "var fiMatch=").replace("if(fm2&&", "if(fiMatch&&").replace("byId[fm2[1]]", "byId[fiMatch[1]]")
-    js_min = " ".join(js.split())
-    return "javascript:" + js_min
+    js_payload = " ".join(
+        line.strip()
+        for line in js.strip().splitlines()
+        if not line.strip().startswith("//")
+    )
+    return "javascript:" + js_payload
 
 
 # ── Procesar datos del bookmarklet (query param ?zp=...) ─────────────────────
@@ -283,6 +299,8 @@ if "zp" in qp and "zp_processed" not in st.session_state:
 
 st.title("🏠 Generador de Fichas Inmobiliarias")
 st.caption("Mudafy Nativa · Daniel Manuel Pérez")
+if "zp_decode_error" in st.session_state:
+    st.error(f"No pude leer los datos del bookmarklet: {st.session_state.pop('zp_decode_error')}")
 
 # ── Auto-procesar datos del bookmarklet ───────────────────────────────────────
 
@@ -366,8 +384,9 @@ if "zp_bookmarklet_data" in st.session_state and "result_url" not in st.session_
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_url, tab_csv, tab_manual, tab_bookmarklet = st.tabs([
+tab_url, tab_zonaprop, tab_csv, tab_manual, tab_bookmarklet = st.tabs([
     "🔗 Desde URL",
+    "🏘️ ZonaProp (HTML)",
     "📋 Desde CSV (lote)",
     "✏️ Carga manual",
     "🔖 Instalar Bookmarklet",
@@ -378,45 +397,128 @@ tab_url, tab_csv, tab_manual, tab_bookmarklet = st.tabs([
 with tab_url:
     st.subheader("Generar desde una publicación online")
     st.markdown(
-        "Pegá el link de cualquier propiedad de **Mudafy** o **ZonaProp**. "
-        "Para ZonaProp en la nube, usá el **bookmarklet** (pestaña 🔖)."
+        "Pegá el link de una propiedad de **Mudafy**. "
+        "Para **ZonaProp**, usá la pestaña **🏘️ ZonaProp (HTML)** porque la descarga directa suele devolver `Forbidden`."
     )
 
     url_input = st.text_input(
         "URL",
-        placeholder="https://mudafy.com.ar/... o https://www.zonaprop.com.ar/...",
+        placeholder="https://mudafy.com.ar/...",
         label_visibility="collapsed",
         key="url_input",
     )
 
     is_zonaprop = "zonaprop" in url_input.lower()
+    if is_zonaprop and url_input.strip():
+        st.session_state["zp_source_url"] = url_input.strip()
+        st.info(
+            "Para ZonaProp, el método más estable ahora es la pestaña **🏘️ ZonaProp (HTML)**. "
+            "Si la descarga directa falla, seguí por ahí."
+        )
 
     if st.button("Generar ficha", type="primary", use_container_width=True, key="btn_url"):
         if url_input.strip():
-            with st.spinner("Descargando datos y fotos..."):
-                try:
-                    row = import_listing(url_input.strip(), config, DEFAULT_PROPERTIES_DIR)
-                    fetch_error = None
-                except Exception as exc:
-                    row = None
-                    fetch_error = exc
-            if row:
-                with st.spinner("Generando ficha..."):
-                    generate_and_store(row, "result_url")
-                st.session_state.pop("zp_paste_visible", None)
-            elif fetch_error:
-                if is_zonaprop and ("403" in str(fetch_error) or "Forbidden" in str(fetch_error)):
-                    st.warning(
-                        "ZonaProp bloqueó la descarga desde este servidor. "
-                        "Usá el **bookmarklet** en la pestaña 🔖 para generar la ficha "
-                        "directamente desde tu navegador con un solo clic."
-                    )
-                else:
+            if is_zonaprop:
+                st.warning(
+                    "ZonaProp bloquea la importación directa por URL con `Forbidden / 403`. "
+                    "Seguí por la pestaña **🏘️ ZonaProp (HTML)** usando esta misma URL."
+                )
+                st.session_state["zp_source_url"] = url_input.strip()
+            else:
+                with st.spinner("Descargando datos y fotos..."):
+                    try:
+                        row = import_listing(url_input.strip(), config, DEFAULT_PROPERTIES_DIR)
+                        fetch_error = None
+                    except Exception as exc:
+                        row = None
+                        fetch_error = exc
+                if row:
+                    with st.spinner("Generando ficha..."):
+                        generate_and_store(row, "result_url")
+                    st.session_state.pop("zp_paste_visible", None)
+                elif fetch_error:
                     st.error(f"No se pudo importar la publicación: {fetch_error}")
         else:
             st.warning("Ingresá una URL válida.")
 
     show_result("result_url")
+
+
+# ── Tab ZonaProp HTML ───────────────────────────────────────────────────────────
+
+with tab_zonaprop:
+    st.subheader("ZonaProp desde HTML")
+    st.markdown(
+        "Este es el método más estable para ZonaProp cuando la descarga directa o el bookmarklet fallan. "
+        "Necesitás la URL de la publicación y el código fuente HTML."
+    )
+    st.markdown("#### Paso a paso")
+    st.markdown(
+        "1. Abrí la publicación en **ZonaProp** en tu navegador.\n"
+        "2. Copiá la URL de la publicación con **Ctrl+L** y después **Ctrl+C**.\n"
+        "3. Abrí el código fuente con **Ctrl+U**.\n"
+        "4. En la pestaña del código fuente hacé **Ctrl+A** y después **Ctrl+C** para copiar todo el HTML.\n"
+        "5. Volvé a esta app.\n"
+        "6. Pegá la URL en el campo **URL de la publicación de ZonaProp**.\n"
+        "7. Pegá el HTML completo en **O pegar el HTML completo**.\n"
+        "8. Tocá **Generar ficha desde HTML de ZonaProp**."
+    )
+    st.info(
+        "Si preferís, en vez de pegar el HTML podés guardar el código fuente como archivo "
+        "y subirlo en `Subir archivo HTML`."
+    )
+    st.code(
+        "ZonaProp\\n"
+        "Ctrl+L\\n"
+        "Ctrl+C\\n"
+        "Ctrl+U\\n"
+        "Ctrl+A\\n"
+        "Ctrl+C\\n"
+        "Volver a la app\\n"
+        "Pegar URL\\n"
+        "Pegar HTML\\n"
+        "Generar ficha",
+        language="text",
+    )
+
+    zp_html_url = st.text_input(
+        "URL de la publicación de ZonaProp",
+        value=st.session_state.get("zp_source_url", ""),
+        placeholder="https://www.zonaprop.com.ar/propiedades/...",
+        key="zp_html_url",
+    )
+    zp_html_file = st.file_uploader(
+        "Subir archivo HTML",
+        type=["html", "txt"],
+        key="zp_html_file",
+        help="Podés guardar el código fuente como archivo y subirlo acá.",
+    )
+    zp_html_text = st.text_area(
+        "O pegar el HTML completo",
+        height=260,
+        placeholder="Pegá aquí el código fuente completo de la página de ZonaProp...",
+        key="zp_html_text",
+    )
+
+    if st.button("Generar ficha desde HTML de ZonaProp", type="primary", use_container_width=True, key="btn_zp_html_tab"):
+        source_url = zp_html_url.strip()
+        source_html = read_uploaded_text(zp_html_file) or zp_html_text.strip()
+
+        if not source_url:
+            st.warning("Ingresá primero la URL de la publicación de ZonaProp.")
+        elif "zonaprop" not in source_url.lower():
+            st.warning("La URL tiene que ser una publicación de ZonaProp.")
+        elif not source_html:
+            st.warning("Pegá el HTML completo o subí un archivo HTML antes de generar.")
+        else:
+            st.session_state["zp_source_url"] = source_url
+            with st.spinner("Procesando HTML de ZonaProp..."):
+                row = process_zonaprop_from_html(source_html, source_url)
+            if row:
+                with st.spinner("Generando ficha..."):
+                    generate_and_store(row, "result_zonaprop_html")
+
+    show_result("result_zonaprop_html")
 
 
 # ── Tab CSV ───────────────────────────────────────────────────────────────────
@@ -598,9 +700,9 @@ with tab_manual:
 with tab_bookmarklet:
     st.subheader("Bookmarklet para ZonaProp")
     st.markdown(
-        "El bookmarklet te permite generar fichas de ZonaProp con **un solo clic** "
-        "desde tu navegador, sin copiar ni pegar nada. "
-        "Lo instalás una sola vez."
+        "Este método es **opcional / experimental**. "
+        "Si no te funciona en tu navegador, usá la pestaña **🏘️ ZonaProp (HTML)**, "
+        "que ahora es el camino más estable."
     )
 
     st.markdown("#### Paso 1 — Ingresá la URL de esta app")
@@ -623,12 +725,13 @@ with tab_bookmarklet:
             "Si no ves la barra, activala con **Ctrl+Shift+B**."
         )
 
-        # Link arrastrable — la forma más fácil de instalar un bookmarklet
-        bm_escaped = bm_code.replace('"', "&quot;").replace("'", "&#39;")
+        # Link arrastrable con href escapado para que el navegador no rompa el bookmarklet.
+        bm_escaped = html.escape(bm_code, quote=True)
         st.markdown(
             f"""
 <div style="text-align:center; padding: 24px 0;">
   <a href="{bm_escaped}"
+     draggable="true"
      style="display:inline-block; padding:14px 28px; background:#4A7C59; color:white;
             font-size:18px; font-weight:bold; border-radius:8px; text-decoration:none;
             border: 3px dashed #2E5240; cursor:grab;"
@@ -643,6 +746,26 @@ with tab_bookmarklet:
             unsafe_allow_html=True,
         )
 
+        st.markdown("#### Paso 2 bis — Instalación manual")
+        st.markdown(
+            "Si el arrastre no funciona en tu navegador, copiá el código completo de abajo "
+            "y guardalo como un favorito nuevo en el campo **URL**."
+        )
+        st.text_area(
+            "Código completo del bookmarklet",
+            value=bm_code,
+            height=180,
+            key="bookmarklet_code_full",
+        )
+        st.download_button(
+            "Descargar código completo",
+            data=bm_code,
+            file_name="bookmarklet-zonaprop.txt",
+            mime="text/plain",
+            use_container_width=True,
+            key="bookmarklet_code_download",
+        )
+
         st.markdown("#### Paso 3 — Usarlo")
         st.markdown(
             "1. Navegá a cualquier propiedad en **zonaprop.com.ar**\n"
@@ -651,6 +774,9 @@ with tab_bookmarklet:
             "4. La ficha se genera sola — solo descargás el resultado"
         )
 
-        st.info("Las fotos se descargan desde los servidores de ZonaProp directamente, sin pasar por el bloqueo.")
+        st.info(
+            "Si al hacer clic en el favorito no pasa nada, no hace falta insistir: "
+            "usá la pestaña **🏘️ ZonaProp (HTML)** y generás la ficha pegando el código fuente."
+        )
     else:
         st.info("Ingresá la URL de la app arriba para generar el bookmarklet.")
