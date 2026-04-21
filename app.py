@@ -144,6 +144,7 @@ def make_bookmarklet(app_url: str) -> str:
     js = r"""(function(){
 try{
 var d={};
+if(location.href.indexOf('zonaprop')<0){alert('Abrí primero una propiedad en zonaprop.com.ar');return;}
 var scripts=document.getElementsByTagName('script');
 var big='';
 for(var i=0;i<scripts.length;i++){if(scripts[i].innerHTML.length>big.length)big=scripts[i].innerHTML;}
@@ -221,8 +222,8 @@ d.amenities=amenities.filter(function(v,i,a){return a.indexOf(v)===i;}).join('|'
 var encoded=btoa(unescape(encodeURIComponent(JSON.stringify(d))));
 var safe=encoded.replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 var appUrl='APP_URL_PLACEHOLDER';
-window.open(appUrl+'?zp='+safe,'_blank');
-}catch(ex){alert('Error al extraer datos: '+ex.message);}
+location.href=appUrl+'?zp='+safe;
+}catch(ex){alert('Error: '+ex.message);}
 })();"""
     js = js.replace("APP_URL_PLACEHOLDER", app_url)
     # Renombrar fm2 → fiMatch para evitar conflicto con fm (feature map)
