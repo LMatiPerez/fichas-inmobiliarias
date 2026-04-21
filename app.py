@@ -24,6 +24,16 @@ from generar_fichas import (
     build_caption,
     export_outputs,
     import_listing,
+    parse_zonaprop_html,
+    extract_zonaprop_photos,
+    extract_zonaprop_map_url,
+    extract_zonaprop_slug,
+    save_remote_image_as_jpeg,
+    normalize_remote_url,
+    fetch_url_bytes,
+    build_osm_map_image,
+    as_float,
+    resolve_font_paths,
     load_config,
     load_rows,
     slugify,
@@ -114,19 +124,81 @@ with tab_url:
         label_visibility="collapsed",
         key="url_input",
     )
+
+    is_zonaprop = "zonaprop" in url_input.lower()
+
     if st.button("Generar ficha", type="primary", use_container_width=True, key="btn_url"):
         if url_input.strip():
             with st.spinner("Descargando datos y fotos..."):
                 try:
                     row = import_listing(url_input.strip(), config, DEFAULT_PROPERTIES_DIR)
+                    fetch_error = None
                 except Exception as exc:
-                    st.error(f"No se pudo importar la publicación: {exc}")
                     row = None
+                    fetch_error = exc
             if row:
                 with st.spinner("Generando ficha..."):
                     generate_and_store(row, "result_url")
+                st.session_state.pop("zp_paste_visible", None)
+            elif fetch_error:
+                if is_zonaprop and "403" in str(fetch_error):
+                    st.session_state["zp_paste_visible"] = True
+                    st.session_state["zp_paste_url"] = url_input.strip()
+                else:
+                    st.error(f"No se pudo importar la publicación: {fetch_error}")
         else:
-            st.warning("Ingresá una URL válida de Mudafy.")
+            st.warning("Ingresá una URL válida.")
+
+    # Fallback ZonaProp: pegar HTML manualmente
+    if st.session_state.get("zp_paste_visible"):
+        st.warning("ZonaProp bloqueó la descarga desde este servidor. Seguí estos pasos:")
+        st.markdown(
+            "1. Abrí el link en tu navegador\n"
+            "2. Presioná **Ctrl + U** (o clic derecho → *Ver código fuente*)\n"
+            "3. Presioná **Ctrl + A** para seleccionar todo, luego **Ctrl + C** para copiar\n"
+            "4. Pegalo en el campo de abajo y hacé clic en **Procesar HTML**"
+        )
+        pasted_html = st.text_area(
+            "HTML de la página de ZonaProp",
+            height=150,
+            placeholder="Pegá aquí el código fuente completo de la página...",
+            key="zp_html_paste",
+        )
+        if st.button("Procesar HTML", type="primary", use_container_width=True, key="btn_zp_html"):
+            if pasted_html.strip():
+                zp_url = st.session_state.get("zp_paste_url", "")
+                with st.spinner("Procesando..."):
+                    try:
+                        row = parse_zonaprop_html(zp_url, pasted_html)
+                        folder = DEFAULT_PROPERTIES_DIR / row["slug"]
+                        folder.mkdir(parents=True, exist_ok=True)
+                        photos = extract_zonaprop_photos(pasted_html)
+                        names = ["foto_principal.jpg", "foto_1.jpg", "foto_2.jpg", "foto_3.jpg"]
+                        for name, photo_url in zip(names, photos):
+                            try:
+                                save_remote_image_as_jpeg(normalize_remote_url(photo_url), folder / name)
+                            except Exception:
+                                pass
+                        map_path = folder / "mapa.png"
+                        map_url = extract_zonaprop_map_url(pasted_html)
+                        if map_url:
+                            try:
+                                import io as _io
+                                from PIL import Image as _Image
+                                data = fetch_url_bytes(map_url)
+                                with _Image.open(_io.BytesIO(data)) as src:
+                                    src.convert("RGB").save(map_path, format="PNG")
+                            except Exception:
+                                pass
+                    except Exception as exc:
+                        st.error(f"Error procesando el HTML: {exc}")
+                        row = None
+                if row:
+                    with st.spinner("Generando ficha..."):
+                        generate_and_store(row, "result_url")
+                    st.session_state.pop("zp_paste_visible", None)
+            else:
+                st.warning("Pegá el HTML primero.")
 
     show_result("result_url")
 
