@@ -49,10 +49,21 @@ st.set_page_config(
 config = load_config(DEFAULT_CONFIG_PATH)
 
 
-def card_to_bytes(card: Image.Image) -> bytes:
+def card_to_bytes(card: Image.Image, image_format: str = "PNG", **save_kwargs) -> bytes:
     buf = io.BytesIO()
-    card.save(buf, format="PNG")
+    card.save(buf, format=image_format, **save_kwargs)
     return buf.getvalue()
+
+
+def build_listing_zip_bytes(items: list[dict[str, str | bytes]]) -> bytes:
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in items:
+            slug = str(item["slug"])
+            zf.writestr(f"{slug}.png", item["png_bytes"])
+            zf.writestr(f"{slug}.jpg", item["jpg_bytes"])
+            zf.writestr(f"{slug}.txt", str(item["caption"]).encode("utf-8"))
+    return zip_buf.getvalue()
 
 
 def show_result(key: str) -> None:
@@ -61,7 +72,7 @@ def show_result(key: str) -> None:
         return
     st.success(f"Ficha generada: **{state['slug']}**")
     st.image(state["png_bytes"], use_container_width=True)
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
             "⬇️ Descargar PNG",
@@ -80,6 +91,15 @@ def show_result(key: str) -> None:
             use_container_width=True,
             key=f"{key}_dl_txt",
         )
+    with col3:
+        st.download_button(
+            "🗜️ Descargar ZIP",
+            data=state["zip_bytes"],
+            file_name=f"{state['slug']}.zip",
+            mime="application/zip",
+            use_container_width=True,
+            key=f"{key}_dl_zip",
+        )
     with st.expander("Ver caption para redes sociales"):
         st.text_area("Caption", value=state["caption"], height=180,
                      label_visibility="collapsed", key=f"{key}_caption_view")
@@ -94,11 +114,20 @@ def generate_and_store(row: dict, state_key: str) -> None:
         st.error(f"Error al generar la ficha: {exc}")
         return
     export_outputs(card, row, config, DEFAULT_OUTPUT_DIR)
+    png_bytes = card_to_bytes(card)
+    jpg_bytes = card_to_bytes(card, image_format="JPEG", quality=94, subsampling=0)
     caption = build_caption(row, config)
     st.session_state[state_key] = {
         "slug": row["slug"],
-        "png_bytes": card_to_bytes(card),
+        "png_bytes": png_bytes,
+        "jpg_bytes": jpg_bytes,
         "caption": caption,
+        "zip_bytes": build_listing_zip_bytes([{
+            "slug": row["slug"],
+            "png_bytes": png_bytes,
+            "jpg_bytes": jpg_bytes,
+            "caption": caption,
+        }]),
         "row": row,
     }
 
@@ -549,32 +578,37 @@ with tab_csv:
                     st.session_state.pop("result_csv_batch", None)
                 else:
                     progress = st.progress(0, text="Generando fichas...")
-                    generated: list[tuple[str, bytes]] = []
+                    generated: list[dict[str, str | bytes]] = []
                     for i, row in enumerate(targets):
                         slug = row.get("slug", f"fila-{i}")
                         try:
                             card = build_card(row, config, DEFAULT_PROPERTIES_DIR)
                             export_outputs(card, row, config, DEFAULT_OUTPUT_DIR)
-                            generated.append((slug, card_to_bytes(card)))
+                            generated.append({
+                                "slug": slug,
+                                "png_bytes": card_to_bytes(card),
+                                "jpg_bytes": card_to_bytes(card, image_format="JPEG", quality=94, subsampling=0),
+                                "caption": build_caption(row, config),
+                            })
                         except Exception as exc:
                             st.warning(f"Error en {slug}: {exc}")
                         progress.progress((i + 1) / len(targets), text=f"Generando {slug}...")
                     progress.empty()
-                    zip_buf = io.BytesIO()
-                    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                        for slug, png_bytes in generated:
-                            zf.writestr(f"{slug}.png", png_bytes)
-                    st.session_state["result_csv_batch"] = {
-                        "count": len(generated),
-                        "zip_bytes": zip_buf.getvalue(),
-                    }
-                    st.session_state.pop("result_csv_single", None)
+                    if generated:
+                        st.session_state["result_csv_batch"] = {
+                            "count": len(generated),
+                            "zip_bytes": build_listing_zip_bytes(generated),
+                        }
+                        st.session_state.pop("result_csv_single", None)
+                    else:
+                        st.session_state.pop("result_csv_batch", None)
+                        st.error("No se pudo generar ninguna ficha del lote.")
 
             batch = st.session_state.get("result_csv_batch")
             if batch:
                 st.success(f"Se generaron {batch['count']} fichas.")
                 st.download_button(
-                    "⬇️ Descargar todas como ZIP",
+                    "🗜️ Descargar lote ZIP",
                     data=batch["zip_bytes"],
                     file_name="fichas.zip",
                     mime="application/zip",
