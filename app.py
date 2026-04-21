@@ -143,20 +143,21 @@ def make_bookmarklet(app_url: str) -> str:
     app_url = app_url.rstrip("/")
     js = r"""(function(){
 try{
-var d={};
 if(location.href.indexOf('zonaprop')<0){alert('Abrí primero una propiedad en zonaprop.com.ar');return;}
-var scripts=document.getElementsByTagName('script');
-var big='';
-for(var i=0;i<scripts.length;i++){if(scripts[i].innerHTML.length>big.length)big=scripts[i].innerHTML;}
-
-function rx(pat,src){var m=(src||big).match(pat);return m?m[1]:'';}
-function rxj(pat){try{return JSON.parse(rx(pat));}catch(e){return null;}}
+var d={};
+// Usar TODO el HTML como fuente de búsqueda
+var big=document.documentElement.innerHTML;
+function rx(pat){var m=big.match(pat);return m?m[1]:'';}
 
 d.url=location.href;
 
+// Schema.org JSON-LD
 var ld=null;
 var ldtags=document.querySelectorAll('script[type="application/ld+json"]');
-for(var j=0;j<ldtags.length;j++){try{var o=JSON.parse(ldtags[j].innerHTML);if(o['@type']==='Apartment'||o['@type']==='House'){ld=o;break;}}catch(e){}}
+for(var j=0;j<ldtags.length;j++){
+  try{var o=JSON.parse(ldtags[j].innerHTML);
+  if(o['@type']==='Apartment'||o['@type']==='House'||o['@type']==='SingleFamilyResidence'){ld=o;break;}}catch(e){}
+}
 if(ld){
   d.titulo=(ld.name||'').replace(/\s*-\s*Zonaprop$/i,'').trim();
   d.descripcion=ld.description||'';
@@ -170,53 +171,83 @@ if(ld){
   if(ld.floorSize)d.total_m2=String(ld.floorSize.value||'');
 }
 
-var m=big.match(/"prices"\s*:\s*\[(\{[^\]]+\})\]/);
-if(m){try{var p=JSON.parse(m[1]);d.moneda=p.currency||p.isoCode||'USD';d.precio=String(p.amount||'');}catch(e){}}
-if(!d.precio){var ps=rx(/'price'\s*:\s*'([^']+)'/);d.moneda=ps.indexOf('USD')>=0?'USD':'$';d.precio=ps.replace(/[^\d]/g,'');}
-var exp=rx(/'expenses'\s*:\s*'(\d+)'/);d.expensas=exp;
+// Precio desde pricesData
+var pm=big.match(/"prices"\s*:\s*\[\s*(\{(?:[^{}]|\{[^{}]*\})*\})\s*\]/);
+if(pm){try{var p=JSON.parse(pm[1]);d.moneda=p.currency||p.isoCode||'USD';d.precio=String(p.amount||'');}catch(e){}}
+// Fallback: 'price': 'USD 155.000'
+if(!d.precio){
+  var ps=rx(/'price'\s*:\s*'([^']+)'/);
+  if(ps){d.moneda=ps.indexOf('USD')>=0?'USD':'$';d.precio=ps.replace(/\D/g,'');}
+}
+// Expensas
+d.expensas=rx(/'expenses'\s*:\s*'(\d+)'/)||rx(/"expenses"\s*:\s*"?(\d+)"?/);
+// Código
+d.codigo=rx(/postingId\s*=\s*["'](\d+)["']/)||rx(/['"]idAviso['"]\s*:\s*['"](\d+)['"]/);
 
-var cid=rx(/postingId\s*=\s*["']?(\d+)["']?/);d.codigo=cid;
-
-var mf=rx(/mainFeatures\s*=\s*(\{)/);
-if(mf){
-  var start=big.indexOf('mainFeatures');var bi=big.indexOf('{',start);var dep=0;var end=bi;
-  for(var k=bi;k<bi+20000&&k<big.length;k++){if(big[k]==='{')dep++;else if(big[k]==='}'){dep--;if(dep===0){end=k+1;break;}}}
+// mainFeatures — buscar en todos los scripts
+var allScripts=document.querySelectorAll('script:not([src]):not([type])');
+var mfRaw='';
+for(var si=0;si<allScripts.length;si++){
+  if(allScripts[si].innerHTML.indexOf('mainFeatures')>=0){mfRaw=allScripts[si].innerHTML;break;}
+}
+if(!mfRaw)mfRaw=big;
+var mfStart=mfRaw.indexOf('mainFeatures');
+if(mfStart>=0){
+  var mfBrace=mfRaw.indexOf('{',mfStart);
+  var mfDepth=0;var mfEnd=mfBrace;
+  for(var mi=mfBrace;mi<mfBrace+30000&&mi<mfRaw.length;mi++){
+    if(mfRaw[mi]==='{')mfDepth++;
+    else if(mfRaw[mi]==='}'){mfDepth--;if(mfDepth===0){mfEnd=mi+1;break;}}
+  }
   try{
-    var mfobj=JSON.parse(big.slice(bi,end));
-    var fm={'CFT100':'total_m2','CFT101':'cubierta_m2','CFT1':'ambientes','CFT2':'dormitorios','CFT3':'banos','CFT4':'toilettes','CFT5':'antiguedad','2000203':'semicubierta_m2','1000019':'disposicion','1000027':'luminosidad'};
-    for(var fk in fm){if(mfobj[fk]){var fv=mfobj[fk].value;if(fv!=null)d[fm[fk]]=String(fv);}}
+    var mfobj=JSON.parse(mfRaw.slice(mfBrace,mfEnd));
+    var fmap={'CFT100':'total_m2','CFT101':'cubierta_m2','CFT1':'ambientes','CFT2':'dormitorios',
+              'CFT3':'banos','CFT4':'toilettes','CFT5':'antiguedad','2000203':'semicubierta_m2',
+              '1000019':'disposicion','1000027':'luminosidad'};
+    for(var fk in fmap){if(mfobj[fk]!=null){var fv=mfobj[fk].value;if(fv!=null)d[fmap[fk]]=String(fv);}}
   }catch(e){}
 }
 
-var latb=rx(/mapLatOf\s*=\s*"([^"]+)"/);var lngb=rx(/mapLngOf\s*=\s*"([^"]+)"/);
-try{d.lat=atob(latb).trim();d.lng=atob(lngb).trim();}catch(e){}
-try{d.map_url=atob(rx(/urlMapOf\s*=\s*"([^"]+)"/)).trim();}catch(e){}
+// Lat/Lng y mapa
+try{d.lat=atob(rx(/mapLatOf\s*=\s*"([^"]+)"/).trim()).trim();}catch(e){}
+try{d.lng=atob(rx(/mapLngOf\s*=\s*"([^"]+)"/).trim()).trim();}catch(e){}
+try{d.map_url=atob(rx(/urlMapOf\s*=\s*"([^"]+)"/).trim()).trim();}catch(e){}
 
-var pat=/(https:\/\/imgar\.zonapropcdn\.com\/avisos\/(?:resize\/)?\d[\d\/]+\/(\d+x\d+)\/(\d+)\.jpg[^\s"'<]*)/g;
-var byId={};var mm;
-while((mm=pat.exec(document.documentElement.innerHTML))!==null){
-  var fw=parseInt(mm[2].split('x')[0]);var fid=mm[3];
-  if(!byId[fid]||fw>byId[fid][0])byId[fid]=[fw,mm[1]];
+// Fotos HD
+var fpat=/(https:\/\/imgar\.zonapropcdn\.com\/avisos\/(?:resize\/)?\d[\d\/]+\/(\d+x\d+)\/(\d+)\.jpg[^\s"'<]*)/g;
+var byId={};var fmm;
+while((fmm=fpat.exec(big))!==null){
+  var fw=parseInt(fmm[2].split('x')[0]);var fid=fmm[3];
+  if(!byId[fid]||fw>byId[fid][0])byId[fid]=[fw,fmm[1]];
 }
 var firstUrl='';var fi=document.querySelector('img[src*="isFirstImage"]');
-if(fi){var fm2=fi.src.match(/\/(\d{8,})\.jpg/);if(fm2&&byId[fm2[1]]){firstUrl=byId[fm2[1]][1];delete byId[fm2[1]];}}
-var photos=[firstUrl].concat(Object.values(byId).sort(function(a,b){return b[0]-a[0];}).map(function(x){return x[1];})).filter(Boolean).slice(0,4);
-d.photos=photos;
+if(fi){var fiMatch=fi.src.match(/\/(\d{8,})\.jpg/);if(fiMatch&&byId[fiMatch[1]]){firstUrl=byId[fiMatch[1]][1];delete byId[fiMatch[1]];}}
+d.photos=[firstUrl].concat(Object.values(byId).sort(function(a,b){return b[0]-a[0];}).map(function(x){return x[1];})).filter(Boolean).slice(0,4);
 
-var gfs=rx(/generalFeatures\s*[=:]\s*(\{)/);
+// Amenities desde generalFeatures
 var amenities=[];
-if(gfs){
-  var gs=big.indexOf('generalFeatures');var gb=big.indexOf('{',gs);var gd=0;var ge=gb;
-  for(var gi=gb;gi<gb+20000&&gi<big.length;gi++){if(big[gi]==='{')gd++;else if(big[gi]==='}'){gd--;if(gd===0){ge=gi+1;break;}}}
+var gfStart=mfRaw.indexOf('generalFeatures');
+if(gfStart<0)gfStart=big.indexOf('generalFeatures');
+if(gfStart>=0){
+  var gfSrc=gfStart===big.indexOf('generalFeatures')?big:mfRaw;
+  var gfBrace=gfSrc.indexOf('{',gfStart);
+  var gfDepth=0;var gfEnd=gfBrace;
+  for(var gi=gfBrace;gi<gfBrace+30000&&gi<gfSrc.length;gi++){
+    if(gfSrc[gi]==='{')gfDepth++;
+    else if(gfSrc[gi]==='}'){gfDepth--;if(gfDepth===0){gfEnd=gi+1;break;}}
+  }
   try{
-    var gfobj=JSON.parse(big.slice(gb,ge));
+    var gfobj=JSON.parse(gfSrc.slice(gfBrace,gfEnd));
     var skip=['cantidad plantas','superficie semicubierta'];
-    for(var cat in gfobj){for(var fid2 in gfobj[cat]){var lbl=gfobj[cat][fid2].label||'';if(lbl&&!skip.some(function(s){return lbl.toLowerCase().indexOf(s)>=0;}))amenities.push(lbl);}}
+    for(var cat in gfobj){for(var fid2 in gfobj[cat]){
+      var lbl=(gfobj[cat][fid2].label||'').trim();
+      if(lbl&&!skip.some(function(s){return lbl.toLowerCase().indexOf(s)>=0;}))amenities.push(lbl);
+    }}
   }catch(e){}
 }
 if(d.disposicion)amenities.push('Disposición '+d.disposicion);
-var flags=rx(/'flagsFeatures'\s*:\s*(\[[^\]]+\])/);
-try{var fa=JSON.parse(flags.replace(/'/g,'"'));fa.forEach(function(f){if(f.label)amenities.push(f.label);});}catch(e){}
+var flagsM=big.match(/'flagsFeatures'\s*:\s*(\[[^\]]+\])/);
+if(flagsM){try{JSON.parse(flagsM[1].replace(/'/g,'"')).forEach(function(f){if(f.label)amenities.push(f.label);});}catch(e){}}
 d.amenities=amenities.filter(function(v,i,a){return a.indexOf(v)===i;}).join('|');
 
 var encoded=btoa(unescape(encodeURIComponent(JSON.stringify(d))));
