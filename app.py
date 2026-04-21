@@ -219,12 +219,14 @@ try{var fa=JSON.parse(flags.replace(/'/g,'"'));fa.forEach(function(f){if(f.label
 d.amenities=amenities.filter(function(v,i,a){return a.indexOf(v)===i;}).join('|');
 
 var encoded=btoa(unescape(encodeURIComponent(JSON.stringify(d))));
+var safe=encoded.replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 var appUrl='APP_URL_PLACEHOLDER';
-window.open(appUrl+'?zp='+encoded,'_blank');
+window.open(appUrl+'?zp='+safe,'_blank');
 }catch(ex){alert('Error al extraer datos: '+ex.message);}
 })();"""
     js = js.replace("APP_URL_PLACEHOLDER", app_url)
-    # Minificar para bookmarklet
+    # Renombrar fm2 → fiMatch para evitar conflicto con fm (feature map)
+    js = js.replace("var fm2=", "var fiMatch=").replace("if(fm2&&", "if(fiMatch&&").replace("byId[fm2[1]]", "byId[fiMatch[1]]")
     js_min = " ".join(js.split())
     return "javascript:" + js_min
 
@@ -234,13 +236,16 @@ window.open(appUrl+'?zp='+encoded,'_blank');
 qp = st.query_params
 if "zp" in qp and "zp_processed" not in st.session_state:
     try:
-        raw = base64.b64decode(qp["zp"]).decode("utf-8")
+        # URL-safe base64: revertir - → + y _ → / y agregar padding
+        raw_b64 = qp["zp"].replace("-", "+").replace("_", "/")
+        raw_b64 += "=" * (-len(raw_b64) % 4)
+        raw = base64.b64decode(raw_b64).decode("utf-8")
         zp_data = json.loads(raw)
         st.session_state["zp_bookmarklet_data"] = zp_data
         st.session_state["zp_processed"] = True
         st.query_params.clear()
-    except Exception:
-        pass
+    except Exception as e:
+        st.session_state["zp_decode_error"] = str(e)
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
