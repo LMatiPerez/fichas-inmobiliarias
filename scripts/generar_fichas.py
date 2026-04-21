@@ -694,13 +694,17 @@ _ZP_TIPO_MAP = {
 
 def fetch_zonaprop_html(url: str) -> str:
     """Descarga la página de ZonaProp usando curl_cffi para evitar bloqueos."""
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "es-AR,es;q=0.9",
+    }
     if _CFFI_AVAILABLE:
-        headers = {
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-            "Accept-Language": "es-AR,es;q=0.9",
-        }
-        resp = _cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=25)
-        return resp.text
+        try:
+            resp = _cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=25)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception:
+            pass
     return fetch_url_text(url)
 
 
@@ -793,12 +797,40 @@ def extract_zonaprop_photos(html: str) -> list[str]:
     return ordered[:4]
 
 
+def extract_zonaprop_general_features(html: str) -> list[str]:
+    """Extrae amenities desde generalFeatures: las entradas con value=None son features presentes."""
+    m = re.search(r"['\"]?generalFeatures['\"]?\s*[=:]\s*(\{)", html)
+    if not m:
+        return []
+    start = m.start(1)
+    depth, end = 0, start
+    for i in range(start, min(start + 20000, len(html))):
+        if html[i] == "{":
+            depth += 1
+        elif html[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    try:
+        data = json.loads(html[start:end])
+    except Exception:
+        return []
+    items: list[str] = []
+    skip_labels = {"cantidad plantas", "superficie semicubierta"}
+    for features in data.values():
+        for feat in features.values():
+            label = str(feat.get("label", "")).strip()
+            if not label:
+                continue
+            if any(s in label.lower() for s in skip_labels):
+                continue
+            items.append(label)
+    return items
+
+
 def extract_zonaprop_amenities(html: str, datos: dict) -> list[str]:
-    amenities: list[str] = []
-    if datos.get("tiene_balcon"):
-        amenities.append("Balcón")
-    if datos.get("tiene_patio"):
-        amenities.append("Patio")
+    amenities: list[str] = extract_zonaprop_general_features(html)
     if datos.get("disposicion"):
         amenities.append(f"Disposición {datos['disposicion']}")
     if datos.get("luminosidad"):

@@ -4,6 +4,10 @@ properties/
 tmp_*.html
 tmp-edge-profile/
 
+# Mantener estructura de directorios vacíos en el repo
+!output/.gitkeep
+!properties/.gitkeep
+
 # Python
 __pycache__/
 *.pyc

@@ -11,6 +11,10 @@ from PIL import Image
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT_DIR / "scripts"))
 
+# Crear directorios necesarios si no existen (en Streamlit Cloud no se suben)
+for _d in ["output", "properties", "data"]:
+    (ROOT_DIR / _d).mkdir(parents=True, exist_ok=True)
+
 from generar_fichas import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_CSV_PATH,
