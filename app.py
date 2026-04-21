@@ -588,24 +588,35 @@ with tab_bookmarklet:
 
         st.markdown("#### Paso 2 — Instalá el bookmarklet")
         st.markdown(
-            "Copiá el código de abajo, luego creá un **nuevo favorito** en tu navegador "
-            "(clic derecho en la barra de favoritos → *Agregar página*), "
-            "poné el nombre que quieras (ej: *Generar Ficha ZP*) y pegá el código en el campo **URL**."
+            "Arrastrá el botón de abajo directo a tu **barra de favoritos**. "
+            "Si no ves la barra, activala con **Ctrl+Shift+B**."
         )
-        st.code(bm_code[:120] + "...", language=None)
-        st.download_button(
-            "📋 Copiar código del bookmarklet",
-            data=bm_code,
-            file_name="bookmarklet.txt",
-            mime="text/plain",
-            use_container_width=True,
+
+        # Link arrastrable — la forma más fácil de instalar un bookmarklet
+        bm_escaped = bm_code.replace('"', "&quot;").replace("'", "&#39;")
+        st.markdown(
+            f"""
+<div style="text-align:center; padding: 24px 0;">
+  <a href="{bm_escaped}"
+     style="display:inline-block; padding:14px 28px; background:#4A7C59; color:white;
+            font-size:18px; font-weight:bold; border-radius:8px; text-decoration:none;
+            border: 3px dashed #2E5240; cursor:grab;"
+     onclick="alert('No hagas clic acá — arrastralo a tu barra de favoritos'); return false;">
+    🔖 Generar Ficha ZP
+  </a>
+  <p style="color:#666; margin-top:12px; font-size:14px;">
+    ☝️ Arrastrá este botón a tu barra de favoritos
+  </p>
+</div>
+""",
+            unsafe_allow_html=True,
         )
 
         st.markdown("#### Paso 3 — Usarlo")
         st.markdown(
             "1. Navegá a cualquier propiedad en **zonaprop.com.ar**\n"
-            "2. Hacé clic en el favorito **Generar Ficha ZP**\n"
-            "3. Se abre esta app automáticamente con todos los datos y fotos cargados\n"
+            "2. Hacé clic en el favorito **Generar Ficha ZP** de tu barra\n"
+            "3. La app se abre automáticamente con todos los datos y fotos cargados\n"
             "4. La ficha se genera sola — solo descargás el resultado"
         )
 
