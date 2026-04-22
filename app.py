@@ -73,6 +73,33 @@ except ImportError:
         download_mudafy_map(payload, folder, regular_font_path)
         return row, get_all_mudafy_photo_urls(payload)
 
+def _extract_all_zonaprop_photos(html_str: str) -> list[str]:
+    """Extrae TODAS las URLs de fotos de ZonaProp sin límite de cantidad."""
+    import re as _re
+    pat = _re.compile(
+        r'(https://imgar\.zonapropcdn\.com/avisos/(?:resize/)?'
+        r'\d[\d/]+/(\d+x\d+)/(\d+)\.jpg[^\s"\'<]*)',
+        _re.IGNORECASE,
+    )
+    by_id: dict[str, tuple[int, str]] = {}
+    for full_url, res_str, foto_id in pat.findall(html_str):
+        w = int(res_str.split("x")[0])
+        if foto_id not in by_id or w > by_id[foto_id][0]:
+            by_id[foto_id] = (w, full_url)
+    first_url = ""
+    first_m = _re.search(
+        r'https://imgar\.zonapropcdn\.com/avisos/[^\s"\'<]+isFirstImage=true', html_str
+    )
+    if first_m:
+        fid_m = _re.search(r'/(\d{8,})\.jpg', first_m.group(0))
+        if fid_m and fid_m.group(1) in by_id:
+            first_url = by_id.pop(fid_m.group(1))[1]
+    ordered = ([first_url] if first_url else []) + [
+        url for _, url in sorted(by_id.values(), key=lambda x: -x[0])
+    ]
+    return ordered
+
+
 st.set_page_config(
     page_title="Generador de Fichas Inmobiliarias",
     page_icon="🏠",
@@ -203,7 +230,7 @@ def preview_zonaprop_from_html(html_str: str, url: str) -> tuple[dict, list[str]
         row = parse_zonaprop_html(url, html_str)
         folder = DEFAULT_PROPERTIES_DIR / row["slug"]
         folder.mkdir(parents=True, exist_ok=True)
-        photo_urls = extract_zonaprop_photos(html_str)
+        photo_urls = _extract_all_zonaprop_photos(html_str)
         map_path = folder / "mapa.png"
         map_url = extract_zonaprop_map_url(html_str)
         if map_url and not map_path.exists():
@@ -488,7 +515,7 @@ while((fmm=fpat.exec(big))!==null){
 }
 var firstUrl='';var fi=document.querySelector('img[src*="isFirstImage"]');
 if(fi){var fiMatch=fi.src.match(/\/(\d{8,})\.jpg/);if(fiMatch&&byId[fiMatch[1]]){firstUrl=byId[fiMatch[1]][1];delete byId[fiMatch[1]];}}
-d.photos=[firstUrl].concat(Object.values(byId).sort(function(a,b){return b[0]-a[0];}).map(function(x){return x[1];})).filter(Boolean).slice(0,4);
+d.photos=[firstUrl].concat(Object.values(byId).sort(function(a,b){return b[0]-a[0];}).map(function(x){return x[1];})).filter(Boolean);
 
 // Amenities desde generalFeatures
 var amenities=[];
