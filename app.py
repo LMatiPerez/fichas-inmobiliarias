@@ -27,21 +27,51 @@ from generar_fichas import (
     build_card,
     build_caption,
     build_osm_map_image,
+    build_mudafy_row,
+    download_mudafy_map,
     export_outputs,
+    extract_remix_context,
     extract_zonaprop_map_url,
     extract_zonaprop_photos,
-    fetch_mudafy_listing_preview,
     fetch_url_bytes,
-    get_all_mudafy_photo_urls,
+    fetch_url_text,
+    find_mudafy_listing_payload,
+    get_mudafy_photo_entries,
     import_listing,
     load_config,
     load_rows,
     normalize_remote_url,
     parse_zonaprop_html,
+    pick_mudafy_photo_url,
     resolve_font_paths,
     save_remote_image_as_jpeg,
     slugify,
 )
+
+# Estas funciones existen en generar_fichas en versiones nuevas;
+# si el servidor tiene una versión vieja las definimos aquí como fallback.
+try:
+    from generar_fichas import get_all_mudafy_photo_urls, fetch_mudafy_listing_preview
+except ImportError:
+    def get_all_mudafy_photo_urls(payload: dict) -> list[str]:  # type: ignore[misc]
+        entries = [
+            p for p in get_mudafy_photo_entries(payload)
+            if p.get("type") == "photo" and p.get("is_enabled", True)
+        ]
+        return [u for u in (pick_mudafy_photo_url(e) for e in entries) if u]
+
+    def fetch_mudafy_listing_preview(  # type: ignore[misc]
+        url: str, config: dict, properties_dir: Path
+    ) -> tuple:
+        page_html = fetch_url_text(url)
+        remix_context = extract_remix_context(page_html)
+        payload = find_mudafy_listing_payload(remix_context)
+        row = build_mudafy_row(url, payload)
+        folder = properties_dir / row["slug"]
+        folder.mkdir(parents=True, exist_ok=True)
+        regular_font_path, _ = resolve_font_paths(config)
+        download_mudafy_map(payload, folder, regular_font_path)
+        return row, get_all_mudafy_photo_urls(payload)
 
 st.set_page_config(
     page_title="Generador de Fichas Inmobiliarias",
