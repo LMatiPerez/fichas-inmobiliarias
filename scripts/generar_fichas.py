@@ -590,6 +590,20 @@ def pick_mudafy_photo_url(photo: dict) -> str:
     ).strip()
 
 
+def get_all_mudafy_photo_urls(payload: dict) -> list[str]:
+    """Returns all enabled photo URLs from a Mudafy payload without downloading."""
+    entries = [
+        p for p in get_mudafy_photo_entries(payload)
+        if p.get("type") == "photo" and p.get("is_enabled", True)
+    ]
+    urls = []
+    for entry in entries:
+        url = pick_mudafy_photo_url(entry)
+        if url:
+            urls.append(url)
+    return urls
+
+
 def download_mudafy_photos(payload: dict, folder: Path) -> None:
     photo_entries = [
         photo
@@ -665,6 +679,21 @@ def import_mudafy_listing(
     download_mudafy_photos(payload, folder)
     download_mudafy_map(payload, folder, regular_font_path)
     return row
+
+
+def fetch_mudafy_listing_preview(
+    url: str, config: dict, properties_dir: Path
+) -> tuple[dict, list[str]]:
+    """Fetches Mudafy data + all photo URLs without downloading photos. Downloads map."""
+    page_html = fetch_url_text(url)
+    remix_context = extract_remix_context(page_html)
+    payload = find_mudafy_listing_payload(remix_context)
+    row = build_mudafy_row(url, payload)
+    folder = properties_dir / row["slug"]
+    folder.mkdir(parents=True, exist_ok=True)
+    regular_font_path, _ = resolve_font_paths(config)
+    download_mudafy_map(payload, folder, regular_font_path)
+    return row, get_all_mudafy_photo_urls(payload)
 
 
 # ── ZonaProp ──────────────────────────────────────────────────────────────────
@@ -794,7 +823,7 @@ def extract_zonaprop_photos(html: str) -> list[str]:
             first_url = by_id.pop(first_id)[1]
     ordered = [first_url] if first_url else []
     ordered += [url for _, url in sorted(by_id.values(), key=lambda x: -x[0])]
-    return ordered[:4]
+    return ordered
 
 
 def extract_zonaprop_general_features(html: str) -> list[str]:

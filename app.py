@@ -30,7 +30,9 @@ from generar_fichas import (
     export_outputs,
     extract_zonaprop_map_url,
     extract_zonaprop_photos,
+    fetch_mudafy_listing_preview,
     fetch_url_bytes,
+    get_all_mudafy_photo_urls,
     import_listing,
     load_config,
     load_rows,
@@ -165,21 +167,15 @@ def generate_and_store(row: dict, state_key: str) -> None:
     }
 
 
-def process_zonaprop_from_html(html: str, url: str) -> dict | None:
+def preview_zonaprop_from_html(html_str: str, url: str) -> tuple[dict, list[str]] | None:
+    """Parses ZonaProp HTML. Returns (row, all_photo_urls). Downloads map but NOT photos."""
     try:
-        row = parse_zonaprop_html(url, html)
+        row = parse_zonaprop_html(url, html_str)
         folder = DEFAULT_PROPERTIES_DIR / row["slug"]
         folder.mkdir(parents=True, exist_ok=True)
-        for name, photo_url in zip(
-            ["foto_principal.jpg", "foto_1.jpg", "foto_2.jpg", "foto_3.jpg"],
-            extract_zonaprop_photos(html),
-        ):
-            try:
-                save_remote_image_as_jpeg(normalize_remote_url(photo_url), folder / name)
-            except Exception:
-                pass
+        photo_urls = extract_zonaprop_photos(html_str)
         map_path = folder / "mapa.png"
-        map_url = extract_zonaprop_map_url(html)
+        map_url = extract_zonaprop_map_url(html_str)
         if map_url and not map_path.exists():
             try:
                 data = fetch_url_bytes(map_url)
@@ -195,10 +191,175 @@ def process_zonaprop_from_html(html: str, url: str) -> dict | None:
                 generated = build_osm_map_image(lat, lng, (610, 350), regular_font_path)
                 if generated:
                     generated.save(map_path, format="PNG")
-        return row
+        return row, photo_urls
     except Exception as exc:
         st.error(f"Error procesando los datos: {exc}")
         return None
+
+
+# ── Formulario de edición + selector de fotos ────────────────────────────────
+
+_EDIT_FIELDS: list[tuple] = [
+    ("titulo",       "Título",                  "text",     None),
+    ("ubicacion",    "Ubicación",               "text",     None),
+    ("operacion",    "Operación",               "select",   ["Venta", "Alquiler"]),
+    ("tipo_inmueble","Tipo de inmueble",         "text",     None),
+    ("moneda",       "Moneda",                  "select",   ["USD", "$"]),
+    ("precio",       "Precio",                  "text",     None),
+    ("expensas",     "Expensas",                "text",     None),
+    ("ambientes",    "Ambientes",               "text",     None),
+    ("dormitorios",  "Dormitorios",             "text",     None),
+    ("banos",        "Baños",                   "text",     None),
+    ("toilettes",    "Toilettes",               "text",     None),
+    ("cubierta_m2",  "Sup. cubierta m²",        "text",     None),
+    ("total_m2",     "Sup. total m²",           "text",     None),
+    ("antiguedad",   "Antigüedad",              "text",     None),
+    ("descripcion",  "Descripción",             "textarea", None),
+    ("amenities",    "Amenities (separar con |)", "textarea", None),
+]
+
+
+def _ekey(pk: str, field: str) -> str:
+    return f"{pk}_edit_{field}"
+
+
+def _init_edit_state(pk: str, row: dict) -> None:
+    for fname, _lbl, wtype, options in _EDIT_FIELDS:
+        k = _ekey(pk, fname)
+        if k not in st.session_state:
+            val = str(row.get(fname, "") or "")
+            if wtype == "select" and options and val not in options:
+                val = options[0]
+            st.session_state[k] = val
+
+
+def _clear_edit_state(pk: str) -> None:
+    for fname, *_ in _EDIT_FIELDS:
+        st.session_state.pop(_ekey(pk, fname), None)
+    for k in list(st.session_state.keys()):
+        if k.startswith(f"{pk}_ph_"):
+            del st.session_state[k]
+
+
+def _apply_selected_photos(folder: Path, photo_urls: list[str], selected_indices: list[int]) -> None:
+    target_names = ["foto_principal.jpg", "foto_1.jpg", "foto_2.jpg", "foto_3.jpg"]
+    chosen = [photo_urls[i] for i in selected_indices[:4]]
+    for name, url in zip(target_names, chosen):
+        try:
+            save_remote_image_as_jpeg(normalize_remote_url(url), folder / name)
+        except Exception as exc:
+            st.warning(f"No se pudo descargar {name}: {exc}")
+
+
+def show_edit_form(pk: str, result_key: str) -> None:
+    """Renders the edit form + photo picker for a pending import. Generates on confirm."""
+    pending = st.session_state.get(pk)
+    if not pending:
+        return
+
+    row = pending["row"]
+    photo_urls = pending.get("photo_urls", [])
+    folder: Path = pending["folder"]
+
+    _init_edit_state(pk, row)
+
+    st.divider()
+    st.markdown("### ✏️ Revisar y editar datos")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.text_input("Título", key=_ekey(pk, "titulo"))
+    with c2:
+        st.text_input("Ubicación", key=_ekey(pk, "ubicacion"))
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.selectbox("Operación", ["Venta", "Alquiler"], key=_ekey(pk, "operacion"))
+    with c2:
+        st.text_input("Tipo de inmueble", key=_ekey(pk, "tipo_inmueble"))
+    with c3:
+        st.selectbox("Moneda", ["USD", "$"], key=_ekey(pk, "moneda"))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.text_input("Precio", key=_ekey(pk, "precio"))
+    with c2:
+        st.text_input("Expensas", key=_ekey(pk, "expensas"))
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.text_input("Ambientes", key=_ekey(pk, "ambientes"))
+    with c2:
+        st.text_input("Dormitorios", key=_ekey(pk, "dormitorios"))
+    with c3:
+        st.text_input("Baños", key=_ekey(pk, "banos"))
+    with c4:
+        st.text_input("Toilettes", key=_ekey(pk, "toilettes"))
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.text_input("Sup. cubierta m²", key=_ekey(pk, "cubierta_m2"))
+    with c2:
+        st.text_input("Sup. total m²", key=_ekey(pk, "total_m2"))
+    with c3:
+        st.text_input("Antigüedad", key=_ekey(pk, "antiguedad"))
+
+    st.text_area("Descripción", height=120, key=_ekey(pk, "descripcion"))
+    st.text_area("Amenities (separar con |)", height=80, key=_ekey(pk, "amenities"))
+
+    # ── Photo picker ────────────────────────────────────────────────────────────
+    st.markdown("### 📸 Elegir fotos")
+    if photo_urls:
+        n = len(photo_urls)
+        st.caption(
+            f"{n} foto{'s' if n != 1 else ''} disponible{'s' if n != 1 else ''}. "
+            "Marcá hasta 4 en orden — la primera marcada será la foto principal. "
+            "Si no marcás ninguna se usan las primeras 4."
+        )
+        COLS = 5
+        for row_i in range((n + COLS - 1) // COLS):
+            thumb_cols = st.columns(COLS)
+            for ci in range(COLS):
+                idx = row_i * COLS + ci
+                if idx >= n:
+                    break
+                with thumb_cols[ci]:
+                    try:
+                        st.image(photo_urls[idx], use_container_width=True)
+                    except Exception:
+                        st.caption("–")
+                    st.checkbox(f"#{idx + 1}", key=f"{pk}_ph_{idx}")
+    else:
+        st.info("No hay fotos disponibles para seleccionar.")
+
+    # ── Generate button ──────────────────────────────────────────────────────────
+    if st.button("🏠 Generar ficha", type="primary", use_container_width=True, key=f"{pk}_btn_gen"):
+        edited_row = dict(row)
+        for fname, _lbl, _wtype, _opts in _EDIT_FIELDS:
+            edited_row[fname] = str(st.session_state.get(_ekey(pk, fname), "") or "")
+
+        if photo_urls:
+            selected = [
+                i for i in range(len(photo_urls))
+                if st.session_state.get(f"{pk}_ph_{i}", False)
+            ]
+            if not selected:
+                selected = list(range(min(4, len(photo_urls))))
+            elif len(selected) > 4:
+                st.warning("Solo se usan las primeras 4 fotos marcadas.")
+                selected = selected[:4]
+        else:
+            selected = []
+
+        with st.spinner("Descargando fotos seleccionadas..."):
+            _apply_selected_photos(folder, photo_urls, selected)
+
+        with st.spinner("Generando ficha..."):
+            generate_and_store(edited_row, result_key)
+
+        _clear_edit_state(pk)
+        del st.session_state[pk]
+        st.rerun()
 
 
 def read_uploaded_text(uploaded_file) -> str:
@@ -366,82 +527,77 @@ if "zp_decode_error" in st.session_state:
 
 # ── Auto-procesar datos del bookmarklet ───────────────────────────────────────
 
-if "zp_bookmarklet_data" in st.session_state and "result_url" not in st.session_state:
+if "zp_bookmarklet_data" in st.session_state:
     zp_data = st.session_state.pop("zp_bookmarklet_data")
-    st.info(f"Datos recibidos desde ZonaProp: **{zp_data.get('titulo', '')}**")
-    with st.spinner("Generando ficha..."):
-        # Reconstruir HTML mínimo para reutilizar parse_zonaprop_html
-        # En realidad usamos los datos directamente
-        url = zp_data.get("url", "")
-        slug = slugify(zp_data.get("titulo", url.split("/")[-1]))
+    st.info(f"Datos recibidos desde ZonaProp: **{zp_data.get('titulo', '')}** — revisá y editá antes de generar.")
 
-        ubicacion_parts = [p for p in [
-            zp_data.get("direccion", ""),
-            zp_data.get("zona", ""),
-            zp_data.get("localidad", ""),
-        ] if p]
-        ubicacion = " | ".join(dict.fromkeys(ubicacion_parts))
+    bm_url = zp_data.get("url", "")
+    bm_slug = slugify(zp_data.get("titulo", bm_url.split("/")[-1]))
 
-        row = {
-            "slug":            slug,
-            "titulo":          zp_data.get("titulo", ""),
-            "ubicacion":       ubicacion,
-            "codigo":          zp_data.get("codigo", ""),
-            "operacion":       "Venta" if "venta" in url.lower() else "Alquiler",
-            "tipo_inmueble":   zp_data.get("tipo_inmueble", "Departamento"),
-            "moneda":          zp_data.get("moneda", "USD"),
-            "precio":          zp_data.get("precio", ""),
-            "descripcion":     zp_data.get("descripcion", ""),
-            "ambientes":       zp_data.get("ambientes", ""),
-            "dormitorios":     zp_data.get("dormitorios", ""),
-            "banos":           zp_data.get("banos", ""),
-            "toilettes":       zp_data.get("toilettes", ""),
-            "garage":          "",
-            "cocheras":        "",
-            "antiguedad":      zp_data.get("antiguedad", ""),
-            "expensas":        zp_data.get("expensas", ""),
-            "orientacion":     "",
-            "cubierta_m2":     zp_data.get("cubierta_m2", ""),
-            "semicubierta_m2": zp_data.get("semicubierta_m2", ""),
-            "total_m2":        zp_data.get("total_m2", ""),
-            "terreno_m2":      "",
-            "amenities":       zp_data.get("amenities", ""),
-            "url":             url,
-            "lat":             zp_data.get("lat", ""),
-            "lng":             zp_data.get("lng", ""),
-        }
+    ubicacion_parts = [p for p in [
+        zp_data.get("direccion", ""),
+        zp_data.get("zona", ""),
+        zp_data.get("localidad", ""),
+    ] if p]
+    bm_ubicacion = " | ".join(dict.fromkeys(ubicacion_parts))
 
-        folder = DEFAULT_PROPERTIES_DIR / slug
-        folder.mkdir(parents=True, exist_ok=True)
+    bm_row = {
+        "slug":            bm_slug,
+        "titulo":          zp_data.get("titulo", ""),
+        "ubicacion":       bm_ubicacion,
+        "codigo":          zp_data.get("codigo", ""),
+        "operacion":       "Venta" if "venta" in bm_url.lower() else "Alquiler",
+        "tipo_inmueble":   zp_data.get("tipo_inmueble", "Departamento"),
+        "moneda":          zp_data.get("moneda", "USD"),
+        "precio":          zp_data.get("precio", ""),
+        "descripcion":     zp_data.get("descripcion", ""),
+        "ambientes":       zp_data.get("ambientes", ""),
+        "dormitorios":     zp_data.get("dormitorios", ""),
+        "banos":           zp_data.get("banos", ""),
+        "toilettes":       zp_data.get("toilettes", ""),
+        "garage":          "",
+        "cocheras":        "",
+        "antiguedad":      zp_data.get("antiguedad", ""),
+        "expensas":        zp_data.get("expensas", ""),
+        "orientacion":     "",
+        "cubierta_m2":     zp_data.get("cubierta_m2", ""),
+        "semicubierta_m2": zp_data.get("semicubierta_m2", ""),
+        "total_m2":        zp_data.get("total_m2", ""),
+        "terreno_m2":      "",
+        "amenities":       zp_data.get("amenities", ""),
+        "url":             bm_url,
+        "lat":             zp_data.get("lat", ""),
+        "lng":             zp_data.get("lng", ""),
+    }
 
-        for name, photo_url in zip(
-            ["foto_principal.jpg", "foto_1.jpg", "foto_2.jpg", "foto_3.jpg"],
-            zp_data.get("photos", []),
-        ):
-            try:
-                save_remote_image_as_jpeg(normalize_remote_url(photo_url), folder / name)
-            except Exception:
-                pass
+    bm_folder = DEFAULT_PROPERTIES_DIR / bm_slug
+    bm_folder.mkdir(parents=True, exist_ok=True)
 
-        map_path = folder / "mapa.png"
-        map_url = zp_data.get("map_url", "")
-        if map_url and not map_path.exists():
-            try:
-                data_bytes = fetch_url_bytes(map_url)
-                with Image.open(io.BytesIO(data_bytes)) as src:
-                    src.convert("RGB").save(map_path, format="PNG")
-            except Exception:
-                pass
-        if not map_path.exists():
-            lat = as_float(row.get("lat", ""))
-            lng = as_float(row.get("lng", ""))
-            if lat is not None and lng is not None:
-                regular_font_path, _ = resolve_font_paths(config)
-                generated = build_osm_map_image(lat, lng, (610, 350), regular_font_path)
-                if generated:
-                    generated.save(map_path, format="PNG")
+    bm_map_path = bm_folder / "mapa.png"
+    bm_map_url = zp_data.get("map_url", "")
+    if bm_map_url and not bm_map_path.exists():
+        try:
+            bm_map_bytes = fetch_url_bytes(bm_map_url)
+            with Image.open(io.BytesIO(bm_map_bytes)) as src:
+                src.convert("RGB").save(bm_map_path, format="PNG")
+        except Exception:
+            pass
+    if not bm_map_path.exists():
+        bm_lat = as_float(bm_row.get("lat", ""))
+        bm_lng = as_float(bm_row.get("lng", ""))
+        if bm_lat is not None and bm_lng is not None:
+            bm_font, _ = resolve_font_paths(config)
+            bm_gen = build_osm_map_image(bm_lat, bm_lng, (610, 350), bm_font)
+            if bm_gen:
+                bm_gen.save(bm_map_path, format="PNG")
 
-        generate_and_store(row, "result_url")
+    _clear_edit_state("pending_url")
+    st.session_state["pending_url"] = {
+        "row": bm_row,
+        "photo_urls": zp_data.get("photos", []),
+        "folder": bm_folder,
+    }
+    st.session_state.pop("result_url", None)
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -478,7 +634,7 @@ with tab_url:
             "Si la descarga directa falla, seguí por ahí."
         )
 
-    if st.button("Generar ficha", type="primary", use_container_width=True, key="btn_url"):
+    if st.button("Importar publicación", type="primary", use_container_width=True, key="btn_url"):
         if url_input.strip():
             if is_zonaprop:
                 st.warning(
@@ -489,20 +645,29 @@ with tab_url:
             else:
                 with st.spinner("Descargando datos y fotos..."):
                     try:
-                        row = import_listing(url_input.strip(), config, DEFAULT_PROPERTIES_DIR)
+                        row, photo_urls = fetch_mudafy_listing_preview(
+                            url_input.strip(), config, DEFAULT_PROPERTIES_DIR
+                        )
                         fetch_error = None
                     except Exception as exc:
                         row = None
+                        photo_urls = []
                         fetch_error = exc
                 if row:
-                    with st.spinner("Generando ficha..."):
-                        generate_and_store(row, "result_url")
-                    st.session_state.pop("zp_paste_visible", None)
+                    folder = DEFAULT_PROPERTIES_DIR / row["slug"]
+                    _clear_edit_state("pending_url")
+                    st.session_state["pending_url"] = {
+                        "row": row,
+                        "photo_urls": photo_urls,
+                        "folder": folder,
+                    }
+                    st.session_state.pop("result_url", None)
                 elif fetch_error:
                     st.error(f"No se pudo importar la publicación: {fetch_error}")
         else:
             st.warning("Ingresá una URL válida.")
 
+    show_edit_form("pending_url", "result_url")
     show_result("result_url")
 
 
@@ -562,7 +727,7 @@ with tab_zonaprop:
         key="zp_html_text",
     )
 
-    if st.button("Generar ficha desde HTML de ZonaProp", type="primary", use_container_width=True, key="btn_zp_html_tab"):
+    if st.button("Importar desde HTML de ZonaProp", type="primary", use_container_width=True, key="btn_zp_html_tab"):
         source_url = zp_html_url.strip()
         source_html = read_uploaded_text(zp_html_file) or zp_html_text.strip()
 
@@ -575,11 +740,19 @@ with tab_zonaprop:
         else:
             st.session_state["zp_source_url"] = source_url
             with st.spinner("Procesando HTML de ZonaProp..."):
-                row = process_zonaprop_from_html(source_html, source_url)
-            if row:
-                with st.spinner("Generando ficha..."):
-                    generate_and_store(row, "result_zonaprop_html")
+                result = preview_zonaprop_from_html(source_html, source_url)
+            if result:
+                row, photo_urls = result
+                folder = DEFAULT_PROPERTIES_DIR / row["slug"]
+                _clear_edit_state("pending_zp")
+                st.session_state["pending_zp"] = {
+                    "row": row,
+                    "photo_urls": photo_urls,
+                    "folder": folder,
+                }
+                st.session_state.pop("result_zonaprop_html", None)
 
+    show_edit_form("pending_zp", "result_zonaprop_html")
     show_result("result_zonaprop_html")
 
 
