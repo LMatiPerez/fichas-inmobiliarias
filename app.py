@@ -48,30 +48,53 @@ from generar_fichas import (
     slugify,
 )
 
-# Estas funciones existen en generar_fichas en versiones nuevas;
-# si el servidor tiene una versión vieja las definimos aquí como fallback.
-try:
-    from generar_fichas import get_all_mudafy_photo_urls, fetch_mudafy_listing_preview
-except ImportError:
-    def get_all_mudafy_photo_urls(payload: dict) -> list[str]:  # type: ignore[misc]
-        entries = [
-            p for p in get_mudafy_photo_entries(payload)
-            if p.get("type") == "photo" and p.get("is_enabled", True)
-        ]
-        return [u for u in (pick_mudafy_photo_url(e) for e in entries) if u]
+def _walk_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for v in value.values():
+            yield from _walk_dicts(v)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_dicts(item)
 
-    def fetch_mudafy_listing_preview(  # type: ignore[misc]
-        url: str, config: dict, properties_dir: Path
-    ) -> tuple:
-        page_html = fetch_url_text(url)
-        remix_context = extract_remix_context(page_html)
-        payload = find_mudafy_listing_payload(remix_context)
-        row = build_mudafy_row(url, payload)
-        folder = properties_dir / row["slug"]
-        folder.mkdir(parents=True, exist_ok=True)
-        regular_font_path, _ = resolve_font_paths(config)
-        download_mudafy_map(payload, folder, regular_font_path)
-        return row, get_all_mudafy_photo_urls(payload)
+
+def _collect_mudafy_photo_urls(remix_context: dict) -> list[str]:
+    """Busca TODAS las fotos en todo el remix_context, sin límite."""
+    seen: set[str] = set()
+    urls: list[str] = []
+    for d in _walk_dicts(remix_context):
+        if not isinstance(d, dict):
+            continue
+        if d.get("is_enabled") is False:
+            continue
+        if d.get("type") in ("video", "floor_plan", "blueprint"):
+            continue
+        url = pick_mudafy_photo_url(d)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def fetch_mudafy_listing_preview(
+    url: str, config: dict, properties_dir: Path
+) -> tuple:
+    page_html = fetch_url_text(url)
+    remix_context = extract_remix_context(page_html)
+    payload = find_mudafy_listing_payload(remix_context)
+    row = build_mudafy_row(url, payload)
+    folder = properties_dir / row["slug"]
+    folder.mkdir(parents=True, exist_ok=True)
+    regular_font_path, _ = resolve_font_paths(config)
+    download_mudafy_map(payload, folder, regular_font_path)
+    photo_urls = _collect_mudafy_photo_urls(remix_context)
+    # fallback: si la búsqueda amplia no encontró nada, usar el método estándar
+    if not photo_urls:
+        photo_urls = [
+            u for u in (pick_mudafy_photo_url(e) for e in get_mudafy_photo_entries(payload))
+            if u
+        ]
+    return row, photo_urls
 
 def _extract_all_zonaprop_photos(html_str: str) -> list[str]:
     """Extrae TODAS las URLs de fotos de ZonaProp sin límite de cantidad."""
